@@ -1,140 +1,265 @@
-import math
+"""Parameter error estimation via Hessian inversion and likelihood contours.
+
+Provides:
+
+* :class:`ApproximateSD` — approximate standard deviations from the inverse
+  Hessian of the log-likelihood at the MLE.
+* :class:`LikelihoodIntervals` — confidence intervals by bisection on the
+  likelihood surface.
+"""
+
+from __future__ import annotations
+
 import copy
+import logging
+import math
+
 import numpy as np
 from numpy import linalg as nplin
 from scipy import optimize
 
-class LikelihoodIntervals:
-    def __init__(self, theta, pdf, data, SD, m):
-        self.SD = SD
-        self.m = m
-        self.pdf = pdf
-        self.theta = theta
-        self.data = data
-        self.Lmax = -pdf.LL(self.theta, self.data)
-        self.clim = math.sqrt(2. * m)
-        self.Lcrit = self.Lmax - m
-        #self.Llimits = self.calculate(theta, pdf, arg)
-        
-    def calculate(self): #, theta, pdf, arg):
-        print('calculating likelihood intervals...')
-        Llimits = []
-        i = 0
-        for j in range(len(self.theta)):
-            xhigh1, xhigh2 = self.theta[i], self.theta[i] + 5 * self.clim * self.SD[i]
-            xlow1, xlow2 = self.theta[i] - 2 * self.clim * self.SD[i], xhigh1
-            if xlow1 < 0: xlow1 = 0.0
+from ekdist._constants import HESSIAN_STEP_FACTOR
 
-            print('\nCalculating Lik limits for parameter- {0} = {1:.3f}'.
-                  format(self.pdf.names[j], self.theta[i]))
-            print('\tInitial guesses for lower limit: {0:.3f} and {1:.3f}'.
-                  format(xlow1, xhigh1))
-            print('\tInitial guesses for higher limit: {0:.3f} and {1:.3f}'.
-                  format(xlow2, xhigh2))
+logger = logging.getLogger(__name__)
 
-            xlowlim = self.__get_limit(j, xlow1, xhigh1, factor=1.)
-            xhighlim = self.__get_limit(j, xlow2, xhigh2, factor=-1.)
-            Llimits.append([xlowlim, xhighlim])
-            i += 1
-        return Llimits
-
-    def __get_limit(self, index, low, high, factor=1.):
-        limit = None
-        found = False
-        iter = 0
-        while not found and iter < 100:
-            L = self.__lik_contour(((low + high) / 2), index, 
-                                self.theta, self.pdf, self.data) 
-            if math.fabs(self.Lcrit - L) > 0.01:
-                low, high = self.__adjust_guesses(low, high, L, factor)
-            else:
-                limit, found = self.__finalize_limit(low, high)
-            iter += 1
-        return limit
-
-    def __finalize_limit(self, low, high):
-        limit = (low + high) / 2
-        if limit < 0: limit = None
-        #print ('limit found: ', limit)
-        return limit, True
-
-    def __adjust_guesses(self, low, high, L, factor=1.):
-        if L * factor < self.Lcrit * factor:
-            low = (low + high) / 2
-        else:
-            high = (low + high) / 2
-        return low, high
-
-    def __lik_contour(self, x, num, theta, func, data):
-        functemp = copy.deepcopy(func)
-        functemp.fixed[num] = True
-        functemp.pars[num] = x
-        theta = functemp.theta
-        result = optimize.minimize(functemp.LL, theta, args=data, method='Nelder-Mead')
-        return -result.fun
 
 class ApproximateSD:
-    def __init__(self, theta, func, arg, delta_step=0.0001):
-        self.hessian = self.hessian_matrix(theta, func, arg, delta_step)
-        self.covariance = nplin.inv(self.hessian)
-        self.sd = np.sqrt(self.covariance.diagonal())
-        self.correlations = self.correlation_matrix(self.covariance)
+    """Approximate standard deviations from the inverse Hessian at the MLE.
 
-    def hessian_matrix(self, theta, LLfunc, args, delta_step=0.0001):
-        """ """
+    The Hessian of the *negative* log-likelihood is estimated by finite
+    differences.  Its inverse is the covariance matrix of the parameters
+    at the MLE (under the Cramér-Rao bound assumption).
+
+    Parameters
+    ----------
+    theta:
+        MLE parameter vector (free parameters only).
+    func:
+        Callable ``func(theta, data)`` returning the *negative* log-likelihood.
+    arg:
+        Data array passed as the second argument to *func*.
+    delta_step:
+        Finite-difference step as a fraction of each parameter value.
+        Adaptive tuning adjusts this automatically.
+
+    Attributes
+    ----------
+    hessian : np.ndarray
+        Estimated Hessian matrix.
+    covariance : np.ndarray
+        Inverse of the Hessian (covariance matrix).
+    sd : np.ndarray
+        Square root of diagonal of covariance (approximate SDs).
+    correlations : np.ndarray
+        Pearson correlation matrix.
+    """
+
+    def __init__(
+        self,
+        theta: np.ndarray,
+        func,
+        arg: np.ndarray,
+        delta_step: float = HESSIAN_STEP_FACTOR,
+    ) -> None:
+        theta = np.asarray(theta, dtype=float)
+        self.hessian = self._hessian_matrix(theta, func, arg, delta_step)
+
+        # Check conditioning before inverting
+        cond = np.linalg.cond(self.hessian)
+        if cond > 1e12:
+            logger.warning(
+                "Hessian is poorly conditioned (cond=%.2e); SDs may be unreliable", cond
+            )
+
+        try:
+            self.covariance = nplin.inv(self.hessian)
+        except nplin.LinAlgError as exc:
+            raise ValueError("Hessian is singular; cannot compute covariance") from exc
+
+        diag = self.covariance.diagonal()
+        if np.any(diag < 0):
+            logger.warning(
+                "Negative diagonal elements in covariance matrix; "
+                "Hessian may not be positive-definite at this point"
+            )
+        self.sd = np.sqrt(np.abs(diag))
+        self.correlations = self._correlation_matrix(self.covariance)
+
+    def _hessian_matrix(
+        self,
+        theta: np.ndarray,
+        LLfunc,
+        args: np.ndarray,
+        delta_step: float,
+    ) -> np.ndarray:
         hess = np.zeros((theta.size, theta.size))
-        deltas = self.__optimal_deltas(theta, LLfunc, args, delta_step)
-        # Diagonal elements of Hessian
-        coe11 = np.array([theta.copy(), ] * theta.size) + np.diag(deltas)
-        coe33 = np.array([theta.copy(), ] * theta.size) - np.diag(deltas)
+        deltas = self._optimal_deltas(theta, LLfunc, args, delta_step)
+        L0 = LLfunc(theta, args)
+
+        # Diagonal elements
         for i in range(theta.size):
-            hess[i, i] = ((LLfunc(coe11[i], args) - 
-                2.0 * LLfunc(theta, args) +
-                LLfunc(coe33[i], args)) / (deltas[i]  ** 2))
-        # Non diagonal elements of Hessian
+            di = deltas[i]
+            tp = theta.copy(); tp[i] += di
+            tn = theta.copy(); tn[i] -= di
+            hess[i, i] = (LLfunc(tp, args) - 2.0 * L0 + LLfunc(tn, args)) / di**2
+
+        # Off-diagonal elements
         for i in range(theta.size):
-            for j in range(theta.size):
-                coe1, coe2, coe3, coe4 = theta.copy(), theta.copy(), theta.copy(), theta.copy()
-                if i != j:                
-                    coe1[i] += deltas[i]
-                    coe1[j] += deltas[j]
-                    coe2[i] += deltas[i]
-                    coe2[j] -= deltas[j]
-                    coe3[i] -= deltas[i]
-                    coe3[j] += deltas[j]
-                    coe4[i] -= deltas[i]
-                    coe4[j] -= deltas[j]
-                    hess[i, j] = ((
-                        LLfunc(coe1, args) -
-                        LLfunc(coe2, args) -
-                        LLfunc(coe3, args) +
-                        LLfunc(coe4, args)) /
-                        (4 * deltas[i] * deltas[j]))
+            for j in range(i + 1, theta.size):
+                di, dj = deltas[i], deltas[j]
+                coe1 = theta.copy(); coe1[i] += di; coe1[j] += dj
+                coe2 = theta.copy(); coe2[i] += di; coe2[j] -= dj
+                coe3 = theta.copy(); coe3[i] -= di; coe3[j] += dj
+                coe4 = theta.copy(); coe4[i] -= di; coe4[j] -= dj
+                val = (
+                    LLfunc(coe1, args) - LLfunc(coe2, args)
+                    - LLfunc(coe3, args) + LLfunc(coe4, args)
+                ) / (4.0 * di * dj)
+                hess[i, j] = val
+                hess[j, i] = val
+
         return hess
 
-    def __tune_deltas(self, theta, func, args, Lcrit, deltas, increase=True):
-        factor = [1, 2] if increase else [-1, 0.5]
+    def _tune_deltas(
+        self,
+        theta: np.ndarray,
+        func,
+        args: np.ndarray,
+        Lcrit: float,
+        deltas: np.ndarray,
+        increase: bool,
+    ) -> np.ndarray:
+        factor, scale = (1, 2.0) if increase else (-1, 0.5)
         count = 0
-        while factor[0] * func(theta + deltas, args) < factor[0] * Lcrit and count < 100:
-            deltas *= factor[1]
+        while factor * func(theta + deltas, args) < factor * Lcrit and count < 100:
+            deltas = deltas * scale
             count += 1
         return deltas
 
-    def __optimal_deltas(self, theta, LLfunc, args, step_factor=0.0001):
-        Lcrit = LLfunc(theta, args) + math.fabs(LLfunc(theta, args) * 0.005)
-        deltas = step_factor * theta
+    def _optimal_deltas(
+        self,
+        theta: np.ndarray,
+        LLfunc,
+        args: np.ndarray,
+        step_factor: float,
+    ) -> np.ndarray:
+        L0 = LLfunc(theta, args)
+        Lcrit = L0 + math.fabs(L0 * 0.005)
+        deltas = step_factor * np.abs(theta)
+        # Avoid zero deltas for parameters near zero
+        deltas = np.where(deltas == 0, step_factor, deltas)
         L = LLfunc(theta + deltas, args)
         if L < Lcrit:
-            deltas = self.__tune_deltas(theta, LLfunc, args, Lcrit, deltas, increase=True)
+            deltas = self._tune_deltas(theta, LLfunc, args, Lcrit, deltas, increase=True)
         elif L > Lcrit:
-            deltas = self.__tune_deltas(theta, LLfunc, args, Lcrit, deltas, increase=False)
+            deltas = self._tune_deltas(theta, LLfunc, args, Lcrit, deltas, increase=False)
         return deltas
 
-    def correlation_matrix(self, covar):
-        correl = np.zeros((len(covar),len(covar)))
-        for i1 in range(len(covar)):
-            for j1 in range(len(covar)):
-                correl[i1,j1] = (covar[i1,j1] / 
-                    np.sqrt(np.multiply(covar[i1,i1],covar[j1,j1])))
-        return correl
+    @staticmethod
+    def _correlation_matrix(covar: np.ndarray) -> np.ndarray:
+        n = len(covar)
+        corr = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                # Use abs to guard against negative diagonal elements when
+                # the Hessian is not positive-definite at this parameter point.
+                denom = math.sqrt(abs(covar[i, i] * covar[j, j]))
+                corr[i, j] = covar[i, j] / denom if denom > 0 else 0.0
+        return corr
 
+
+class LikelihoodIntervals:
+    """Likelihood-based confidence intervals by bisection on the LL surface.
+
+    For each free parameter, holds all other parameters at their MLE values
+    and finds the parameter values where the log-likelihood drops by *m* units
+    (corresponding roughly to *m* standard deviations for large samples).
+
+    Parameters
+    ----------
+    theta:
+        MLE free parameter vector.
+    pdf:
+        Fitted distribution object (must expose ``LL(theta, data)`` and
+        ``fixed`` / ``pars`` attributes following the :class:`ExponentialPDF`
+        convention).
+    data:
+        Observed data.
+    SD:
+        Approximate standard deviations from :class:`ApproximateSD`.
+    m:
+        Likelihood drop defining the interval (e.g., m=2 ≈ 2 SD).
+    """
+
+    def __init__(
+        self,
+        theta: np.ndarray,
+        pdf,
+        data: np.ndarray,
+        SD: np.ndarray,
+        m: float = 2.0,
+    ) -> None:
+        self.theta = np.asarray(theta, dtype=float)
+        self.pdf = pdf
+        self.data = np.asarray(data, dtype=float)
+        self.SD = np.asarray(SD, dtype=float)
+        self.m = float(m)
+        self.Lmax = -pdf.LL(self.theta, self.data)
+        self.clim = math.sqrt(2.0 * m)
+        self.Lcrit = self.Lmax - m
+
+    def calculate(self) -> np.ndarray:
+        """Compute lower and upper likelihood limits for each free parameter.
+
+        Returns
+        -------
+        np.ndarray, shape (n_params, 2)
+            ``result[i] = [lower_limit, upper_limit]`` for parameter *i*.
+        """
+        logger.info("Calculating likelihood intervals…")
+        limits = []
+        for j in range(len(self.theta)):
+            val = self.theta[j]
+            sd = self.SD[j]
+            xhi1, xhi2 = val, val + 5.0 * self.clim * sd
+            xlo1, xlo2 = max(0.0, val - 2.0 * self.clim * sd), val
+            logger.debug(
+                "Parameter %d = %.4f  lower search [%.4f, %.4f]  upper [%.4f, %.4f]",
+                j, val, xlo1, xlo2, xhi1, xhi2,
+            )
+            lo = self._find_limit(j, xlo1, xlo2, factor=1.0)
+            hi = self._find_limit(j, xhi1, xhi2, factor=-1.0)
+            limits.append([lo, hi])
+        return np.array(limits)
+
+    def _find_limit(
+        self, index: int, low: float, high: float, factor: float
+    ) -> float | None:
+        # For lower-limit searches: if the LL at the boundary is already above
+        # Lcrit, the CI extends all the way to the boundary — return it directly
+        # rather than running 100 iterations and silently returning None.
+        if factor > 0:
+            L_low = self._contour_LL(low, index)
+            if math.isfinite(L_low) and L_low >= self.Lcrit:
+                return low
+
+        for _ in range(100):
+            mid = (low + high) / 2.0
+            L = self._contour_LL(mid, index)
+            if math.fabs(self.Lcrit - L) <= 0.01:
+                return mid  # mid is always >= 0 given search range
+            if factor * L < factor * self.Lcrit:
+                low = mid
+            else:
+                high = mid
+        logger.warning("Likelihood interval bisection did not converge for parameter %d", index)
+        return None
+
+    def _contour_LL(self, x: float, num: int) -> float:
+        """LL with parameter *num* fixed at *x*, all others optimised."""
+        func = copy.deepcopy(self.pdf)
+        func.fixed[num] = True
+        func.pars[num] = x
+        theta_free = func.theta
+        res = optimize.minimize(func.LL, theta_free, args=self.data, method="Nelder-Mead")
+        return -res.fun

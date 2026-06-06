@@ -1,48 +1,44 @@
-import os, sys
-import math
-from scipy.optimize import minimize, bisect
+"""Backward-compatible tests for ExponentialPDF (originally from ekdist.exponentials).
+
+Preserved and updated to use the new ekdist.fitting module.
+"""
+
 import numpy as np
 import numpy.testing as npt
-from numpy import linalg as nplin
 
-from ekdist import exponentials
+from ekdist.fitting import ExponentialPDF
+
 
 def test_area_none():
     tau_in = [0.1, 1.0]
-    epdf = exponentials.ExponentialPDF(tau=tau_in)
+    pdf = ExponentialPDF(tau=tau_in)
     area = np.ones(2) / 2
-    print(epdf.area)
-    npt.assert_almost_equal(epdf.area, area)
+    npt.assert_almost_equal(pdf.area, area)
     pars = np.concatenate((np.asarray(tau_in), area))
-    print(epdf.pars)
-    npt.assert_almost_equal(epdf.pars, pars)
-    print(epdf.fixed)
+    npt.assert_almost_equal(pdf.pars, pars)
     fixed = [False, False, False, True]
-    assert fixed == epdf.fixed
-    print(epdf.theta)
-    theta = pars[: -1]
-    npt.assert_almost_equal(epdf.theta, theta)
+    assert fixed == pdf.fixed
+    theta = pars[:-1]
+    npt.assert_almost_equal(pdf.theta, theta)
+
 
 def test_insert_theta():
     tau_in = [0.1, 1.0]
-    epdf = exponentials.ExponentialPDF(tau=tau_in)
-    theta_in = [0.2, 2., 0.3]
-    epdf.theta = theta_in
-    print(epdf.theta)
-    print(epdf.pars)
-    pars_in = [0.2, 2., 0.3, 0.7]
-    npt.assert_almost_equal(epdf.pars, pars_in)
+    pdf = ExponentialPDF(tau=tau_in)
+    theta_in = [0.2, 2.0, 0.3]
+    pdf.theta = theta_in
+    pars_in = [0.2, 2.0, 0.3, 0.7]
+    npt.assert_almost_equal(pdf.pars, pars_in)
+
 
 def test_fixed_pars():
     tau_in = [0.1, 1.0]
-    epdf = exponentials.ExponentialPDF(tau=tau_in)
-    epdf.fixed[1] = True
+    pdf = ExponentialPDF(tau=tau_in)
+    pdf.fixed[1] = True
     fixed = [False, True, False, True]
-    assert fixed == epdf.fixed
+    assert fixed == pdf.fixed
     theta_in = [0.2, 0.3]
-    epdf.theta = theta_in
-    print(epdf.theta)
-    print(epdf.pars)
-    pars_in = [0.2, 1., 0.3, 0.7]
-    npt.assert_almost_equal(epdf.pars, pars_in)
-    npt.assert_almost_equal(epdf.theta, theta_in)
+    pdf.theta = theta_in
+    pars_in = [0.2, 1.0, 0.3, 0.7]
+    npt.assert_almost_equal(pdf.pars, pars_in)
+    npt.assert_almost_equal(pdf.theta, theta_in)

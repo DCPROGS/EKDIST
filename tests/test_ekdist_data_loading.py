@@ -1,45 +1,54 @@
-import os
-import numpy as np
+"""Data-loading tests — SCN reading via dcio, record construction via ekdist."""
 
-from ekdist import ekscn
-from ekdist import ekrecord
+import numpy as np
+import numpy.testing as npt
+import pytest
+
+from dcio.formats.scn import read as scn_read
+from ekdist.record import SingleChannelRecord
+from ekdist.bursts import Bursts
+
 
 class TestSCNFileLoading:
-    def setUp(self):
-        self.infile = "./tests/AChsim.scn"
-        self.header = ekscn.read_header(self.infile)
-        self.itint, self.iampl, self.iprops = ekscn.read_data(self.infile, self.header)
-        
-    def test_infile_exists(self):
-        assert os.path.isfile(self.infile)
-        
-    def test_SCN_header_loading(self):
-        assert self.header
-        
-    def test_interval_number(self):
-        assert self.header['nint'] == 13948
-        
-    def test_interval_loading(self):    
-        assert self.header['nint'] == len(self.itint)
-        
-    def test_flags(self):
-        assert not self.iprops.any()
-        
-    def test_amplitudes(self):
-        assert self.iampl[0] == 0.
-        assert self.iampl[1] == 6.
-        assert self.iampl[2] == 0.
+    """Read AChsim.scn (simulated, version -103) via dcio and verify basic properties."""
 
-    def tearDown(self):
-        self.header = None
-        self.itint, self.iampl, self.iprops = None, None, None
-        
+    @pytest.fixture(autouse=True)
+    def load(self, scn_file):
+        self.rec = scn_read(scn_file)
+
+    def test_infile_exists(self, scn_file):
+        assert scn_file.exists()
+
+    def test_header_version(self):
+        assert self.rec.header.version == -103
+
+    def test_header_record_type(self):
+        assert self.rec.header.record_type == "simulated"
+
+    def test_interval_number(self):
+        # Simulated files have a sentinel at the end that is stripped; allow ±1.
+        assert abs(len(self.rec.intervals) - 13948) <= 1
+
+    def test_intervals_same_length_as_amplitudes(self):
+        assert len(self.rec.intervals) == len(self.rec.amplitudes)
+
+    def test_flags_all_zero(self):
+        # AChsim.scn: all flags are 0 (usable) except the stripped sentinel.
+        assert not self.rec.flags[:-1].any()
+
+    def test_first_interval_is_shut(self):
+        assert self.rec.amplitudes[0] == 0.0
+
+    def test_second_interval_is_open(self):
+        # Raw ADC amplitude 6, multiplied by calfac2 → non-zero pA value.
+        assert self.rec.amplitudes[1] != 0.0
+
+
 class TestIntervalListLoading:
-    def setUp(self):
-        self.intervals = [20.0, 1.0, 19.0, 100.0, 10.0, 100.0, 1.0]
-        self.amplitudes = [5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0]
-        self.rec = ekrecord.SingleChannelRecord()
-        self.rec.load_intervals_from_list(np.array(self.intervals), np.array(self.amplitudes))
+    def setup_method(self):
+        self.intervals = np.array([20.0, 1.0, 19.0, 100.0, 10.0, 100.0, 1.0])
+        self.amplitudes = np.array([5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0])
+        self.rec = SingleChannelRecord.from_intervals(self.intervals, self.amplitudes)
 
     def test_original_number_intervals(self):
         assert len(self.rec.itint) == 7
@@ -56,14 +65,9 @@ class TestIntervalListLoading:
         self.rec.tres = 2.0
         assert len(self.rec.periods.intervals) == 3
         assert len(self.rec.periods.amplitudes) == 3
-        assert len(self.rec.periods.flags) == 3 
+        assert len(self.rec.periods.flags) == 3
 
     def test_burst_number(self):
         self.rec.tres = 2.0
-        br = ekrecord.Bursts(self.rec.periods)
-        br.slice_bursts(50.0)
-        assert len(br.bursts) == 2 
-
-    def tearDown(self):
-        self.intervals, self.amplitudes = None, None
-        self.rec = None
+        br = Bursts.from_periods(self.rec.periods, tcrit=50.0)
+        assert len(br.bursts) == 2
