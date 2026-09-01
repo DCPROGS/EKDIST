@@ -11,7 +11,7 @@ from ekdist import errors
 from ekdist import exponentials
 
 class TestErrorCalculation:
-    def setUp(self):
+    def setup_method(self):
         self.infile = "./tests/intervals.txt"
         self.intervals = np.loadtxt(self.infile)
         self.tau, self.area = [0.036, 1.1], [0.20]

@@ -5,7 +5,7 @@ from ekdist import ekscn
 from ekdist import ekrecord
 
 class TestSCNFileLoading:
-    def setUp(self):
+    def setup_method(self):
         self.infile = "./tests/AChsim.scn"
         self.header = ekscn.read_header(self.infile)
         self.itint, self.iampl, self.iprops = ekscn.read_data(self.infile, self.header)
@@ -35,7 +35,7 @@ class TestSCNFileLoading:
         self.itint, self.iampl, self.iprops = None, None, None
         
 class TestIntervalListLoading:
-    def setUp(self):
+    def setup_method(self):
         self.intervals = [20.0, 1.0, 19.0, 100.0, 10.0, 100.0, 1.0]
         self.amplitudes = [5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0]
         self.rec = ekrecord.SingleChannelRecord()
@@ -63,6 +63,46 @@ class TestIntervalListLoading:
         br = ekrecord.Bursts(self.rec.periods)
         br.slice_bursts(50.0)
         assert len(br.bursts) == 2 
+
+    def test_unusable_shut_ends_a_cluster(self):
+        """Clause (2) of slice_bursts: an unusable shut ends a cluster whatever
+        its nominal duration. Time-course fitting leaves such an interval with
+        no defined length, so it is never comparable with tcrit -- here it is
+        far shorter, and used to be treated as a within-burst gap that joined
+        two clusters into one."""
+        intervals = [20.0, 0.04, 19.0]
+        amplitudes = [5.0, 0.0, 5.0]
+        flags = [0, ekrecord.FLAG_UNUSABLE, 0]
+        rec = ekrecord.SingleChannelRecord()
+        rec.load_intervals_from_list(np.array(intervals), np.array(amplitudes),
+                                     np.array(flags))
+        br = ekrecord.Bursts(rec.periods)
+        br.slice_bursts(50.0)
+        assert len(br.bursts) == 2
+        assert [b.tolist() for b in br.bursts] == [[20.0], [19.0]]
+
+    def test_unusable_flag_marks_its_own_period(self):
+        """A period is unusable if an interval *in it* is. The flag used to be
+        applied before the merge decision, so an unusable interval marked the
+        period it was about to end -- flagging the opening in front of it."""
+        intervals = [20.0, 0.04, 19.0]
+        amplitudes = [5.0, 0.0, 5.0]
+        flags = [0, ekrecord.FLAG_UNUSABLE, 0]
+        rec = ekrecord.SingleChannelRecord()
+        rec.load_intervals_from_list(np.array(intervals), np.array(amplitudes),
+                                     np.array(flags))
+        assert list(rec.periods.flags) == [0, ekrecord.FLAG_UNUSABLE, 0]
+
+    def test_first_opening_starts_a_cluster(self):
+        """Clause (1): no gap longer than tcrit is required before the first
+        cluster of a record."""
+        intervals = [20.0, 100.0, 19.0]
+        amplitudes = [5.0, 0.0, 5.0]
+        rec = ekrecord.SingleChannelRecord()
+        rec.load_intervals_from_list(np.array(intervals), np.array(amplitudes))
+        br = ekrecord.Bursts(rec.periods)
+        br.slice_bursts(50.0)
+        assert len(br.bursts) == 2
 
     def tearDown(self):
         self.intervals, self.amplitudes = None, None

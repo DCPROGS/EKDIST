@@ -1,7 +1,7 @@
 from ekdist import ekrecord
 
 class TestFunctional:
-    def setUp(self):
+    def setup_method(self):
         # Initialise a new empty record
         self.rec = ekrecord.SingleChannelRecord(verbose=True)
         
