@@ -34,6 +34,17 @@ class TestSCNFileLoading:
         self.header = None
         self.itint, self.iampl, self.iprops = None, None, None
         
+    def test_intervals_are_float64(self):
+        """The ms-to-s conversion must widen before it scales.
+
+        tint is stored as float32, and under NEP 50 a float32 array times a
+        Python float stays float32, so `np.array(tint) * 0.001` did the scaling
+        in single precision. Over A-10 that lost 2e-5 s from a 435 s record --
+        4.6e-8 relative -- and reached the fitted likelihood. It matched
+        dcpyps only because dcpyps rounded the same way."""
+        assert self.itint.dtype == np.float64
+
+
 class TestIntervalListLoading:
     def setup_method(self):
         self.intervals = [20.0, 1.0, 19.0, 100.0, 10.0, 100.0, 1.0]
