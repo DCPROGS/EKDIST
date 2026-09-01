@@ -14,10 +14,7 @@ setup(name='ekdist',
           'numpy',
           'scipy',
           'matplotlib',
-          # The shared record layer. Not on PyPI yet, so a source install
-          # needs it first:
-          #   pip install git+https://github.com/DCPROGS/dcio
-          'dcio',
+          'dcio>=0.1.0',      # the shared record layer
           #'PyQt5',
       ],
       zip_safe=False)
