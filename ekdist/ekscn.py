@@ -642,7 +642,13 @@ def read_data(fname, header):
                 iampl.pop()
                 iprops.pop()
         
-    return np.array(tint)*0.001, np.array(iampl), np.array(iprops)
+    # float64 before scaling, not after. tint is array('f'), and under NEP 50
+    # a float32 array times a Python float stays float32, so the ms-to-s
+    # multiply was done in single precision and threw away most of the
+    # digits the stored value carries. Over A-10 that is 2e-5 s in a 435 s
+    # record -- 4.6e-8 relative, and it reached the fitted likelihood.
+    return (np.array(tint, dtype=np.float64) * 1e-3,
+            np.array(iampl), np.array(iprops))
 
 def write(intervals, amplitudes, flags, calfac=1.0, ffilt=-1.0, rms=0.0,
         treso=0.0, tresg=0.0, Emem=0.0,
