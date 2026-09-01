@@ -1,0 +1,116 @@
+# EKDIST was the last repository in the DCPROGS stack without CI, which
+# mattered more once it stopped being self-contained: it now takes its
+# log-binning from dcio, so a change over there can break it here.
+#
+# dcio is not on PyPI, so every job installs it from git before installing
+# EKDIST. That step is the first thing to revisit when dcio is published.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # ekplot imports matplotlib.pyplot at module level. Runners have no display;
+  # be explicit rather than relying on the backend autoselection.
+  MPLBACKEND: Agg
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor is dcio's requires-python (>=3.11), not EKDIST's own --
+          # setup.py declares none, and the dependency sets it in practice.
+          - { name: linux-py311, os: ubuntu-24.04, python: '3.11' }
+          - { name: linux-py312, os: ubuntu-24.04, python: '3.12' }
+          - { name: linux-py313, os: ubuntu-24.04, python: '3.13' }
+          - { name: macos,       os: macos-14,     python: '3.13' }
+          - { name: windows,     os: windows-2022, python: '3.12' }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      # dcio must go in first: it is named in install_requires but cannot be
+      # resolved from PyPI, so `pip install -e .` would fail without it.
+      - name: Install dcio from git
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/DCPROGS/dcio@master
+
+      - name: Install
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest
+          pip list
+
+      # The record files are read by relative path from the repository root
+      # ("./tests/AChsim.scn"), so the suite only passes when run from there.
+      - name: Test data present
+        shell: bash
+        run: |
+          for f in tests/AChsim.scn tests/intervals.txt; do
+            test -f "$f" || { echo "missing test data: $f"; exit 1; }
+          done
+          echo "test data present"
+
+      - name: Tests
+        shell: bash
+        run: pytest tests/
+
+  # setup.py has to name everything the package imports. scipy did not appear
+  # in install_requires despite ekplot, errors and exponentials all importing
+  # it, which no editable install from a populated environment can reveal --
+  # only a clean one can. This job is that clean environment.
+  clean-install:
+    name: clean-install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install into an empty virtualenv
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --upgrade pip
+          /tmp/clean/bin/pip install git+https://github.com/DCPROGS/dcio@master
+          /tmp/clean/bin/pip install .
+          /tmp/clean/bin/pip list
+
+      - name: Import every module with nothing else installed
+        env:
+          MPLBACKEND: Agg
+        run: |
+          cd /tmp
+          /tmp/clean/bin/python - <<'PY'
+          from ekdist import ekplot, ekrecord, ekscn, eklib, exponentials, errors
+          from ekdist.ekplot import prepare_xlog_hist
+          print("all ekdist modules import from a clean install")
+          PY

@@ -9,8 +9,10 @@ setup(name='ekdist',
       author_email='',
       license='MIT',
       packages=['ekdist'],
+      python_requires='>=3.11',      # dcio's floor, inherited
       install_requires=[
           'numpy',
+          'scipy',
           'matplotlib',
           # The shared record layer. Not on PyPI yet, so a source install
           # needs it first:
