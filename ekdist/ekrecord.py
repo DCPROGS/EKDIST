@@ -4,6 +4,12 @@ import numpy as np
 
 from ekdist import ekscn
 
+#: SCN property bit 3, "duration unusable" -- see ekscn.read_data. An
+#: interval carrying it has no defined length: time-course fitting could not
+#: measure it, so it must never be compared with a time.
+FLAG_UNUSABLE = 8
+
+
 class SingleChannelRecord(object):
     """
     A wrapper over a list of time intervals 
@@ -232,7 +238,10 @@ class SingleChannelRecord(object):
             self.rprop = self.rprop[1:]
 
     def __remove_last_interval_if_shut_or_bad(self):
-        while (self.rtint[-1] < 0) or (self.rampl[-1] == 0):
+        # The flag, not a negative duration: _impose_resolution marks the last
+        # interval unusable rather than giving it a negative length, so the
+        # old test could never fire and only the shut test did any work.
+        while ((self.rprop[-1] & FLAG_UNUSABLE) != 0) or (self.rampl[-1] == 0):
             self.rtint = self.rtint[:-1]
             self.rampl = self.rampl[:-1]
             self.rprop = self.rprop[:-1]
@@ -265,12 +274,16 @@ class Periods:
     def _set_periods(self, rintervals, ramplitudes, rprops):
         oint, oamp, oopt = rintervals[0], ramplitudes[0] * rintervals[0], rprops[0]
         for t, a, o in zip(rintervals[1 : ], ramplitudes[1 : ], rprops[1 : ]):
-            if o >= 8: oopt = 8
             condition_both_open = ((math.fabs(a) > 0.0) and (math.fabs(oamp) > 0.0))
             condition_both_shut = ((a == 0.0) and (oamp == 0.0))
             if condition_both_open or condition_both_shut:
                 oint += t
                 oamp += a * t
+                # A period is unusable if any interval *in it* is. This test
+                # used to sit before the merge decision, so an unusable
+                # interval marked the period it was about to end rather than
+                # the one it belongs to -- flagging the preceding opening.
+                if o >= FLAG_UNUSABLE: oopt = FLAG_UNUSABLE
             else:
                 self.__append_period_to_list(oint, oamp, oopt)
                 oint, oamp, oopt = t, a, o
@@ -295,6 +308,7 @@ class Bursts(object):
     """   """
     def __init__(self, periods, tcrit=None):
         self.t, self.a = np.array(periods.intervals), np.array(periods.amplitudes)
+        self.f = np.array(periods.flags, dtype=int)
         self.o = np.array(periods.amplitudes)
         self.bursts = None
         
@@ -305,15 +319,53 @@ class Bursts(object):
         (1) Doesn't require a gap > tcrit before the 1st cluster in each record;
         (2) Unusable shut time is a valid end of cluster;
         (3) Open probability of a cluster is calculated without considering
-        last opening. """
+        last opening.
+
+        Clause (2) is now applied from the flags rather than left to the record
+        having been stripped beforehand. It used to hold only at the end of a
+        record: an unusable period in the middle was compared with tcrit like
+        any other shut, and since its duration is not a measured time it was
+        usually short, so two clusters were joined into one. The same
+        convention, and the same strictly-greater test against tcrit, is
+        implemented in scalcs.scsim.
+        """
 
         self.tcrit = tcrit
-        long_shuts = np.intersect1d(np.where(self.t > tcrit),
-                                    np.where(self.a == 0.0))
-        groups = np.split(self.t, long_shuts)
-        #amplitudes = np.split(self.t, long_shuts)
-        #bamps = [amplitudes[0]] + [np.delete(a, 0) for a in amplitudes[1:]]
-        self.bursts = [groups[0]] + [np.delete(a, 0) for a in groups[1:]]
+        unusable = (self.f & FLAG_UNUSABLE) != 0
+        # A cluster ends at a gap longer than tcrit or at a period of unknown
+        # length. An unusable period has no measured duration, so it is never
+        # compared with tcrit.
+        separator = ((self.a == 0.0) & (self.t > tcrit) & ~unusable) | unusable
+
+        # Clause (1): the first defined opening starts a cluster, no preceding
+        # gap required. Trim to the first and last of them.
+        opening = (self.a != 0.0) & ~unusable
+        if not opening.any():
+            self.bursts = []
+            return
+        lo = int(np.argmax(opening))
+        hi = int(len(opening) - np.argmax(opening[::-1]))
+
+        groups, seg = [], []
+        for t, a, sep in zip(self.t[lo:hi], self.a[lo:hi], separator[lo:hi]):
+            if sep:
+                if seg:
+                    groups.append(seg)
+                seg = []
+            else:
+                seg.append((t, a))
+        if seg:
+            groups.append(seg)
+
+        bursts = []
+        for seg in groups:
+            while seg and seg[0][1] == 0.0:      # start on an opening, so that
+                seg = seg[1:]                    # burst[0::2] are the openings
+            while seg and seg[-1][1] == 0.0:
+                seg = seg[:-1]
+            if seg:
+                bursts.append(np.array([t for t, _ in seg]))
+        self.bursts = bursts
     
     def get_burst_total_open_time(self, burst):
         return np.sum(burst[0::2])
