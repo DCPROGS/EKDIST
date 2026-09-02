@@ -603,52 +603,47 @@ def read_header (fname, verbose=False):
     return header
 
 def read_data(fname, header):
-    """
-    Read idealised data- intervals, amplitudes, flags- rom SCN file.
-    Data=
-    real*4 tint(1...nint) 	 4nint bytes
-    integer*2 iampl(1..nint)   2nint bytes
-    integer*1 iprops(1..nint)  nint  bytes
-    Total storage needed = 7 * nint bytes
-    integer*1 iprops(i) holds properties of ith duration and amplitude
-    (integer*1 has range -128 to +127 (bit 7 set gives -128; can use bits 0-6)
-    0 = all OK;
-    1 = amplitude dubious = bit 0;
-    2 = amplitude fixed = bit 1;
-    4 = amplitude of opening constrained (see fixamp) = bit 2;
-    8 = duration unusable = bit 3; etc
-    and keep sum of values of more than one property is true.
-    """
+    """Read idealised intervals, amplitudes and flags from an SCN file.
 
-    tint = array ('f') # 4 byte float
-    iampl = array ('h') # 2 byte integer
-    iprops = array('b') # 1 byte integer
+    Delegates to :func:`dcio.formats.scn.read`, which is the one SCN reader in
+    the DCPROGS stack. EKDIST had a second implementation of the same binary
+    decoding, and two copies of a format parser is two places for a record to
+    be read differently -- which is what happened: the interval array is
+    stored as 4-byte floats, and under NEP 50 the millisecond-to-second
+    multiply stayed in single precision here, discarding most of the digits
+    the file actually carries.
 
-    f=open(fname, 'rb')
-    f.seek(header['ioffset']-1)
-    tint.fromfile(f, header['nint'])
-    iampl.fromfile(f, header['nint'])
-    iprops.fromfile(f, header['nint'])
-    f.close()
-     
-    if header['iscanver'] > 0:
-        gapnotfound = True
-        while gapnotfound:
-            if iampl[-1] == 0:
-                gapnotfound = False
-                iprops[-1] = 8
-            else:
-                tint.pop()
-                iampl.pop()
-                iprops.pop()
-        
-    # float64 before scaling, not after. tint is array('f'), and under NEP 50
-    # a float32 array times a Python float stays float32, so the ms-to-s
-    # multiply was done in single precision and threw away most of the
-    # digits the stored value carries. Over A-10 that is 2e-5 s in a 435 s
-    # record -- 4.6e-8 relative, and it reached the fitted likelihood.
-    return (np.array(tint, dtype=np.float64) * 1e-3,
-            np.array(iampl), np.array(iprops))
+    The contract is unchanged. Amplitudes come back as the raw stored integers,
+    not in pA, because that is what this has always returned and what
+    ``SingleChannelRecord.load_SCN_file`` scales by ``calfac2``. dcio applies
+    the calibration on read, so it is divided back out; the values are small
+    integers and the round trip is exact.
+
+    Parameters
+    ----------
+    fname : str
+        Path to the SCN file.
+    header : dict
+        As returned by :func:`read_header`. Only ``calfac2`` is used; dcio
+        reads the file's own header for everything else.
+
+    Returns
+    -------
+    intervals : ndarray of float64
+        Durations in seconds.
+    amplitudes : ndarray
+        Raw stored amplitudes, before calibration.
+    flags : ndarray
+        Property flags; bit 3 set means the duration is unusable.
+    """
+    from dcio.formats.scn import read as _dcio_read
+
+    record = _dcio_read(fname)
+    calfac = record.header.calfac2 or 1.0
+    return (np.asarray(record.intervals, dtype=np.float64),
+            np.asarray(record.amplitudes) / calfac,
+            np.asarray(record.flags))
+
 
 def write(intervals, amplitudes, flags, calfac=1.0, ffilt=-1.0, rms=0.0,
         treso=0.0, tresg=0.0, Emem=0.0,
