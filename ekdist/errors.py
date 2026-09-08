@@ -74,16 +74,109 @@ class LikelihoodIntervals:
         return -result.fun
 
 class ApproximateSD:
-    def __init__(self, theta, func, arg, delta_step=0.0001):
-        self.hessian = self.hessian_matrix(theta, func, arg, delta_step)
-        self.covariance = nplin.inv(self.hessian)
-        self.sd = np.sqrt(self.covariance.diagonal())
-        self.correlations = self.correlation_matrix(self.covariance)
+    """Approximate standard deviations and correlations from the Hessian.
 
-    def hessian_matrix(self, theta, LLfunc, args, delta_step=0.0001):
-        """ """
+    The Hessian of the function being minimised is estimated by finite
+    differences, inverted to give the covariance matrix, and from that the
+    standard deviation of each estimate and the correlation between each pair.
+    ``func`` is the quantity that was *minimised* -- minus the log likelihood --
+    so it increases as the parameters move away from the fitted values.
+
+    Everything turns on the increments used for the finite differences. Two
+    rules are available.
+
+    **The default**, unchanged since this class was written, sizes a single
+    relative increment so that moving *every* parameter together by that
+    relative amount changes ``func`` by 0.5% of its own value.
+
+    **The absolute rule**, selected by giving ``delta_L``, is the one described
+    by Colquhoun, Hatton & Hawkes (2003), p. 702: the increment is found
+    separately **for each parameter**, and is the one that changes ``func`` by
+    ``delta_L`` -- an absolute amount, not a fraction of the value. Where no
+    such increment can be found, because the fit is insensitive to that
+    parameter, its row and column are omitted from the Hessian before it is
+    inverted, exactly as the paper describes, and its index is listed in
+    :attr:`dropped`.
+
+    Which rule to use matters when the likelihood surface is strongly
+    anisotropic. Moving all the parameters together, as the default does, moves
+    along the diagonal ridge that such a surface has, where the function changes
+    slowly; the increment that results can be far too large for the directions
+    across the ridge.
+
+    Parameters
+    ----------
+    theta : ndarray
+        The fitted parameters.
+    func : callable
+        ``func(theta, arg) -> float``, the quantity minimised.
+    arg : object
+        Passed through to ``func``.
+    delta_step : float
+        Relative size of the first increment tried, before tuning.
+    delta_L : float, optional
+        Selects the absolute rule, and is the change in ``func`` each increment
+        is tuned to produce. Note that the paper's 0.1 "log units" are natural
+        logarithms; a likelihood in log10 wants 0.1/ln(10) = 0.0434.
+    max_relative_delta : float
+        An increment larger than this multiple of its own parameter counts as
+        not found, and the parameter is dropped. Absolute rule only.
+
+    Attributes
+    ----------
+    hessian, covariance : ndarray
+        Square, over the parameters actually used -- smaller than ``theta`` if
+        any were dropped.
+    kept, dropped : tuple of int
+        Indices into ``theta``.
+    sd, correlations : ndarray
+        Full size, indexed by parameter, with ``nan`` for dropped parameters,
+        so that ``sd[i]`` always refers to ``theta[i]``.
+    deltas : ndarray
+        The increments used; ``nan`` for dropped parameters.
+    """
+
+    def __init__(self, theta, func, arg, delta_step=0.0001,
+                 delta_L=None, max_relative_delta=100.0):
+        theta = np.asarray(theta, float)
+        if delta_L is None:
+            self.deltas = self.__optimal_deltas(theta, func, arg, delta_step)
+            self.dropped = ()
+        else:
+            self.deltas = self.__absolute_deltas(
+                theta, func, arg, delta_step, delta_L, max_relative_delta)
+            self.dropped = tuple(
+                int(i) for i in np.flatnonzero(~np.isfinite(self.deltas)))
+        self.kept = tuple(i for i in range(theta.size) if i not in self.dropped)
+
+        self.hessian = self.hessian_matrix(theta, func, arg, delta_step,
+                                           deltas=self.deltas, keep=self.kept)
+        self.covariance = nplin.inv(self.hessian)
+
+        self.sd = np.full(theta.size, np.nan)
+        self.sd[list(self.kept)] = np.sqrt(self.covariance.diagonal())
+        reduced = self.correlation_matrix(self.covariance)
+        self.correlations = np.full((theta.size, theta.size), np.nan)
+        for a, i in enumerate(self.kept):
+            for b, j in enumerate(self.kept):
+                self.correlations[i, j] = reduced[a, b]
+
+    def hessian_matrix(self, theta, LLfunc, args, delta_step=0.0001,
+                       deltas=None, keep=None):
+        """Second derivatives of ``LLfunc`` by central differences.
+
+        ``deltas`` and ``keep`` are supplied by :meth:`__init__`; called
+        directly with neither, this behaves as it always has.
+        """
+        theta = np.asarray(theta, float)
+        if deltas is None:
+            deltas = self.__optimal_deltas(theta, LLfunc, args, delta_step)
+        if keep is None:
+            keep = tuple(range(theta.size))
+        if len(keep) != theta.size:
+            return self.__hessian_subset(theta, LLfunc, args, deltas, keep)
+
         hess = np.zeros((theta.size, theta.size))
-        deltas = self.__optimal_deltas(theta, LLfunc, args, delta_step)
         # Diagonal elements of Hessian
         coe11 = np.array([theta.copy(), ] * theta.size) + np.diag(deltas)
         coe33 = np.array([theta.copy(), ] * theta.size) - np.diag(deltas)
@@ -111,6 +204,80 @@ class ApproximateSD:
                         LLfunc(coe4, args)) /
                         (4 * deltas[i] * deltas[j]))
         return hess
+
+    def __hessian_subset(self, theta, LLfunc, args, deltas, keep):
+        """The Hessian over ``keep`` only, the rest omitted as in the paper."""
+        keep = list(keep)
+        n = len(keep)
+        hess = np.zeros((n, n))
+        L0 = LLfunc(theta, args)
+        for a, i in enumerate(keep):
+            up, down = theta.copy(), theta.copy()
+            up[i] += deltas[i]
+            down[i] -= deltas[i]
+            hess[a, a] = ((LLfunc(up, args) - 2.0 * L0 + LLfunc(down, args))
+                          / deltas[i] ** 2)
+        for a, i in enumerate(keep):
+            for b, j in enumerate(keep):
+                if a >= b:
+                    continue
+                pp, pm, mp, mm = (theta.copy(), theta.copy(),
+                                  theta.copy(), theta.copy())
+                pp[i] += deltas[i]; pp[j] += deltas[j]
+                pm[i] += deltas[i]; pm[j] -= deltas[j]
+                mp[i] -= deltas[i]; mp[j] += deltas[j]
+                mm[i] -= deltas[i]; mm[j] -= deltas[j]
+                value = ((LLfunc(pp, args) - LLfunc(pm, args)
+                          - LLfunc(mp, args) + LLfunc(mm, args))
+                         / (4 * deltas[i] * deltas[j]))
+                hess[a, b] = hess[b, a] = value
+        return hess
+
+    def __change_in(self, theta, func, args, index, delta):
+        """How much ``func`` rises when parameter ``index`` moves by ``delta``.
+
+        ``inf`` if it cannot be evaluated there, which counts as too large a
+        step and makes the caller try a smaller one.
+        """
+        trial = theta.copy()
+        trial[index] += delta
+        try:
+            value = func(trial, args)
+        except (ArithmeticError, ValueError, RuntimeError):
+            return np.inf
+        if not np.isfinite(value):
+            return np.inf
+        return value - self.__L0
+
+    def __absolute_deltas(self, theta, func, args, step_factor, delta_L,
+                          max_relative):
+        """One increment per parameter, each changing ``func`` by ``delta_L``.
+
+        The rule of Colquhoun, Hatton & Hawkes (2003), p. 702. Returns ``nan``
+        for a parameter whose increment could not be found, which is how a
+        parameter the fit is insensitive to gets dropped.
+        """
+        self.__L0 = func(theta, args)
+        deltas = np.full(theta.size, np.nan)
+        for i in range(theta.size):
+            scale = abs(theta[i]) if theta[i] != 0.0 else 1.0
+            biggest = max_relative * scale
+            delta = step_factor * scale
+            change = self.__change_in(theta, func, args, i, delta)
+            if change < delta_L:                        # too small: grow it
+                while change < delta_L and delta < biggest:
+                    delta *= 2.0
+                    change = self.__change_in(theta, func, args, i, delta)
+            else:                                       # too big: shrink it
+                smallest = 1e-12 * scale
+                while change > delta_L and delta > smallest:
+                    delta /= 2.0
+                    change = self.__change_in(theta, func, args, i, delta)
+                delta *= 2.0                            # the last one that was
+                change = self.__change_in(theta, func, args, i, delta)
+            if np.isfinite(change) and change >= delta_L and delta <= biggest:
+                deltas[i] = delta
+        return deltas
 
     def __tune_deltas(self, theta, func, args, Lcrit, deltas, increase=True):
         factor = [1, 2] if increase else [-1, 0.5]
