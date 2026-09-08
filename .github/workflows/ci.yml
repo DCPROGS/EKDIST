@@ -96,13 +96,30 @@ jobs:
           /tmp/clean/bin/pip install .
           /tmp/clean/bin/pip list
 
+      # Enumerated rather than listed by hand. The hand-written list said "every
+      # module" and had already fallen behind -- ekdist.adjacent was not in it --
+      # so a new module with an undeclared dependency would have gone straight
+      # through the job meant to catch exactly that. pkgutil finds whatever is
+      # actually installed.
       - name: Import every module with nothing else installed
         env:
           MPLBACKEND: Agg
         run: |
           cd /tmp
           /tmp/clean/bin/python - <<'PY'
-          from ekdist import ekplot, ekrecord, ekscn, eklib, exponentials, errors
-          from ekdist.ekplot import prepare_xlog_hist
-          print("all ekdist modules import from a clean install")
+          import importlib
+          import pkgutil
+
+          import ekdist
+
+          names = sorted(m.name for m in pkgutil.iter_modules(ekdist.__path__))
+          if not names:
+              raise SystemExit("no ekdist submodules found; the install is wrong")
+          for name in names:
+              importlib.import_module(f"ekdist.{name}")
+              print(f"  ok  ekdist.{name}")
+
+          # one attribute, so that a module which imports but is empty shows up
+          from ekdist.ekplot import prepare_xlog_hist   # noqa: F401
+          print(f"all {len(names)} ekdist modules import from a clean install")
           PY
